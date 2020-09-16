@@ -726,6 +726,28 @@ fu_udev_device_get_sysfs_path (FuUdevDevice *self)
 }
 
 /**
+ * fu_udev_device_get_number:
+ * @self: A #FuUdevDevice
+ *
+ * Gets the device number, if any.
+ *
+ * Returns: integer, or 0 if unavailable
+ *
+ * Since: 1.5.0
+ **/
+guint64
+fu_udev_device_get_number (FuUdevDevice *self)
+{
+#ifdef HAVE_GUDEV
+	FuUdevDevicePrivate *priv = GET_PRIVATE (self);
+	g_return_val_if_fail (FU_IS_UDEV_DEVICE (self), 0);
+	if (priv->udev_device != NULL)
+		return fu_common_strtoull (g_udev_device_get_number (priv->udev_device));
+#endif
+	return 0;
+}
+
+/**
  * fu_udev_device_get_vendor:
  * @self: A #FuUdevDevice
  *
