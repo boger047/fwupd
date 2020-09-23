@@ -11,7 +11,13 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
+#ifdef HAVE_MMAN_H
 #include <sys/mman.h>
+#endif
+
+#ifdef HAVE_VALGRIND
+#include <valgrind.h>
+#endif /* HAVE_VALGRIND */
 
 #include "fu-chunk.h"
 #include "fu-bcm57xx-common.h"
@@ -23,11 +29,11 @@ typedef struct {
 	gsize	 bufsz;
 } FuBcm57xxMmap;
 
-#define FU_BCM57XX_MMAP_MAX	3
+#define FU_BCM57XX_BAR_MAX	3
 
 struct _FuBcm57xxDevice {
 	FuUdevDevice		 parent_instance;
-	FuBcm57xxMmap		 bar[FU_BCM57XX_MMAP_MAX];
+	FuBcm57xxMmap		 bar[FU_BCM57XX_BAR_MAX];
 };
 
 G_DEFINE_TYPE (FuBcm57xxDevice, fu_bcm57xx_device, FU_TYPE_UDEV_DEVICE)
@@ -55,100 +61,28 @@ fu_bcm57xx_device_probe (FuUdevDevice *device, GError **error)
 static gboolean
 fu_bcm57xx_device_setup (FuDevice *device, GError **error)
 {
+	/* XXX: get NVRAM version */
 	return TRUE;
 }
 
 static gboolean
 fu_bcm57xx_device_open (FuDevice *device, GError **error)
 {
+	/* XXX */
 	return TRUE;
 }
 
 static gboolean
 fu_bcm57xx_device_close (FuDevice *device, GError **error)
 {
+	/* XXX */
 	return TRUE;
 }
 
-typedef union {
-	guint32 r32;
-	struct {
-		guint32 reserved_0_0		: 1;
-		guint32 Reset			: 1;
-		guint32 reserved_2_2		: 1;
-		guint32 Done			: 1;
-		guint32 Doit			: 1;
-		guint32 Wr			: 1;
-		guint32 Erase			: 1;
-		guint32 First			: 1;
-		guint32 Last			: 1;
-		guint32 reserved_15_9		: 7;
-		guint32 WriteEnableCommand	: 1;
-		guint32 WriteDisableCommand	: 1;
-		guint32 reserved_31_18		: 14;
-	} __attribute__((packed)) bits;
-} RegNVMCommand_t;
-
-typedef union {
-	guint32 r32;
-	struct {
-		guint32 ReqSet0			: 1;
-		guint32 ReqSet1			: 1;
-		guint32 ReqSet2			: 1;
-		guint32 ReqSet3			: 1;
-		guint32 ReqClr0			: 1;
-		guint32 ReqClr1			: 1;
-		guint32 ReqClr2			: 1;
-		guint32 ReqClr3			: 1;
-		guint32 ArbWon0			: 1;
-		guint32 ArbWon1			: 1;
-		guint32 ArbWon2			: 1;
-		guint32 ArbWon3			: 1;
-		guint32 Req0			: 1;
-		guint32 Req1			: 1;
-		guint32 Req2			: 1;
-		guint32 Req3			: 1;
-		guint32 reserved_31_16		: 16;
-	} __attribute__((packed)) bits;
-} RegNVMSoftwareArbitration_t;
-
-typedef union {
-	guint32 r32;
-	struct {
-		guint32 Enable			: 1;
-		guint32 WriteEnable		: 1;
-		guint32 reserved_31_2		: 30;
-	} __attribute__((packed)) bits;
-} RegNVMAccess_t;
-
-
 #ifdef __ppc64__
-//#define BARRIER()	asm volatile ("sync 0\neieio\n" : : : "memory")
+#define BARRIER()	__asm__ volatile ("sync 0\neieio\n" : : : "memory")
 #else
-//#define BARRIER()	asm volatile ("" : : : "memory")
-#define BARRIER()	;
-#endif
-
-#if 0
-static guint32
-read_from_ram (guint32 val, guint32 offset, void *args)
-{
-	uint8_t *base = (uint8_t *) args;
-	base += offset;
-	BARRIER();
-	return *(guint32 *)base;
-}
-
-static guint32
-write_to_ram (guint32 val, guint32 offset, void *args)
-{
-	uint8_t *base = (uint8_t *) args;
-	base += offset;
-	BARRIER();
-	*(guint32 *)base = val;
-	BARRIER();
-	return val;
-}
+#define BARRIER()	__asm__ volatile ("" : : : "memory");
 #endif
 
 static guint32
@@ -167,14 +101,6 @@ fu_bcm57xx_device_bar_write (FuBcm57xxDevice *self, guint bar, gsize offset, gui
 	*(guint32 *)base = val;
 	BARRIER();
 }
-
-#define REG_DEVICE_PCI_VENDOR_DEVICE_ID		0x6434
-#define REG_NVM_SOFTWARE_ARBITRATION		0x7020
-#define REG_NVM_ACCESS				0x7024
-#define REG_NVM_COMMAND				0x7000
-#define REG_NVM_ADDR				0x700c
-#define REG_NVM_READ				0x7010
-#define REG_NVM_WRITE				0x7008
 
 typedef enum {
 	FU_BCM57XX_DEVICE_MODE_DISABLED,
@@ -320,19 +246,20 @@ fu_bcm57xx_device_detach (FuDevice *device, GError **error)
 	if (!fu_device_unbind_driver (device, error))
 		return FALSE;
 
-#if 0
+#ifdef RUNNING_ON_VALGRIND
 	/* this can't work */
 	if (RUNNING_ON_VALGRIND) {
 		g_set_error_literal (error,
 				     G_IO_ERROR,
 				     G_IO_ERROR_NOT_SUPPORTED,
-				     "running on valgrind is not supported");
+				     "cannot mmap'ing BARs when using valgrind");
 		return FALSE;
 	}
 #endif
 
+#ifdef HAVE_MMAN_H
 	/* map BARs */
-	for (guint i = 0; i < FU_BCM57XX_MMAP_MAX; i++) {
+	for (guint i = 0; i < FU_BCM57XX_BAR_MAX; i++) {
 		int memfd;
 		struct stat st;
 		g_autofree gchar *fn = NULL;
@@ -374,38 +301,24 @@ fu_bcm57xx_device_detach (FuDevice *device, GError **error)
 			return FALSE;
 		}
 	}
+#else
+	g_set_error_literal (error,
+			     G_IO_ERROR,
+			     G_IO_ERROR_NOT_SUPPORTED,
+			     "mmap() not supported as sys/mman.h not available");
+	return FALSE;
+#endif
 
 	/* verify we can read something simple */
 	vendev = fu_bcm57xx_device_bar_read (self, 0x0, REG_DEVICE_PCI_VENDOR_DEVICE_ID);
 	g_debug ("REG_DEVICE_PCI_VENDOR_DEVICE_ID=%x", vendev);
-	if ((vendev & 0xffff0000) >> 4 != 0x14e4) {
+	if ((vendev & 0xffff0000) >> 16 != 0x14e4) {
 		g_set_error (error,
 			     G_IO_ERROR,
 			     G_IO_ERROR_NOT_SUPPORTED,
 			     "invalid bar[0] VID, got %08x, expected %04xXXXX",
 			     vendev, (guint) 0x14e4);
 		return FALSE;
-	}
-
-	if (!fu_bcm57xx_device_acquire_lock (self, error))
-		return FALSE;
-	if (!fu_bcm57xx_device_set_mode (self, FU_BCM57XX_DEVICE_MODE_ENABLED, error))
-		return FALSE;
-
-	{
-		guint32 buf[4] = { 0x0 };
-		if (!fu_bcm57xx_device_read (self, 0x0, buf, 4, error))
-			return FALSE;
-		for (guint i = 0; i < 4; i++)
-			g_warning ("%02x", buf[i]);
-	}
-
-	if (!fu_bcm57xx_device_release_lock (self, error))
-		return FALSE;
-
-	if (0) {
-		if (!fu_bcm57xx_device_write (self, 0x0, NULL, 0, error))
-			return FALSE;
 	}
 
 	/* success */
@@ -417,14 +330,16 @@ fu_bcm57xx_device_attach (FuDevice *device, GError **error)
 {
 	FuBcm57xxDevice *self = FU_BCM57XX_DEVICE (device);
 
+#ifdef HAVE_MMAN_H
 	/* unmap BARs */
-	for (guint i = 0; i < FU_BCM57XX_MMAP_MAX; i++) {
+	for (guint i = 0; i < FU_BCM57XX_BAR_MAX; i++) {
 		if (self->bar[i].buf == NULL)
 			continue;
 		munmap (self->bar[i].buf, self->bar[i].bufsz);
 		self->bar[i].buf = NULL;
 		self->bar[i].bufsz = 0;
 	}
+#endif
 
 	/* bind tg3 */
 	if (!fu_device_bind_driver (device, "pci", "tg3", error))
@@ -437,12 +352,37 @@ fu_bcm57xx_device_attach (FuDevice *device, GError **error)
 static FuFirmware *
 fu_bcm57xx_device_read_firmware (FuDevice *device, GError **error)
 {
-//	FuBcm57xxDevice *self = FU_BCM57XX_DEVICE (device);
+	FuBcm57xxDevice *self = FU_BCM57XX_DEVICE (device);
+	gsize bufsz_dwrds = BCM_FIRMWARE_SIZE / sizeof(guint32);
+	g_autofree guint32 *buf_dwrds = g_new0 (guint32, bufsz_dwrds);
+	g_autoptr(FuDeviceLocker) locker = NULL;
+	g_autoptr(GByteArray) buf = g_byte_array_sized_new (BCM_FIRMWARE_SIZE);
 	g_autoptr(GBytes) fw = NULL;
+	g_autoptr(FuFirmware) firmware = fu_bcm57xx_firmware_new ();
 
+	/* read from hardware */
 	fu_device_set_status (device, FWUPD_STATUS_DEVICE_READ);
-	fw = g_bytes_new (NULL, 0);
-	return fu_firmware_new_from_bytes (fw);
+	locker = fu_device_locker_new_full (self,
+					    (FuDeviceLockerFunc) fu_bcm57xx_device_acquire_lock,
+					    (FuDeviceLockerFunc) fu_bcm57xx_device_release_lock,
+					    error);
+	if (locker == NULL)
+		return NULL;
+	if (!fu_bcm57xx_device_set_mode (self, FU_BCM57XX_DEVICE_MODE_ENABLED, error))
+		return NULL;
+	if (!fu_bcm57xx_device_read (self, 0x0, buf_dwrds, bufsz_dwrds, error))
+		return NULL;
+	if (!fu_bcm57xx_device_set_mode (self, FU_BCM57XX_DEVICE_MODE_DISABLED, error))
+		return NULL;
+
+	/* build firmware */
+	fu_device_set_status (device, FWUPD_STATUS_DECOMPRESSING);
+	for (guint i = 0; i < bufsz_dwrds; i++)
+		fu_byte_array_append_uint32 (buf, buf_dwrds[i], G_BIG_ENDIAN);
+	fw = g_byte_array_free_to_bytes (g_steal_pointer (&buf));
+	if (!fu_firmware_parse (firmware, fw, FWUPD_INSTALL_FLAG_NONE, error))
+		return NULL;
+	return g_steal_pointer (&firmware);
 }
 
 static FuFirmware *
@@ -503,12 +443,41 @@ fu_bcm57xx_device_write_firmware (FuDevice *device,
 				  FwupdInstallFlags flags,
 				  GError **error)
 {
-//	FuBcm57xxDevice *self= FU_BCM57XX_DEVICE (device);
+	FuBcm57xxDevice *self= FU_BCM57XX_DEVICE (device);
+	const guint8 *buf;
+	gsize bufsz = 0;
+	gsize bufsz_dwrds = BCM_FIRMWARE_SIZE / sizeof(guint32);
+	g_autofree guint32 *buf_dwrds = g_new0 (guint32, bufsz_dwrds);
+	g_autoptr(FuDeviceLocker) locker = NULL;
 	g_autoptr(GBytes) blob = NULL;
 
 	/* build the images into one linear blob of the correct size */
+	fu_device_set_status (device, FWUPD_STATUS_DECOMPRESSING);
 	blob = fu_firmware_write (firmware, error);
 	if (blob == NULL)
+		return FALSE;
+
+	/* read big endian DWORDs ready for writing */
+	buf = g_bytes_get_data (blob, &bufsz);
+	for (guint i = 0; i < bufsz_dwrds; i++) {
+		if (!fu_common_read_uint32_safe (buf, bufsz, i * sizeof(guint32),
+						 &buf_dwrds[i], G_BIG_ENDIAN, error))
+			return FALSE;
+	}
+
+	/* hit hardware */
+	fu_device_set_status (device, FWUPD_STATUS_DEVICE_WRITE);
+	locker = fu_device_locker_new_full (self,
+					    (FuDeviceLockerFunc) fu_bcm57xx_device_acquire_lock,
+					    (FuDeviceLockerFunc) fu_bcm57xx_device_release_lock,
+					    error);
+	if (locker == NULL)
+		return FALSE;
+	if (!fu_bcm57xx_device_set_mode (self, FU_BCM57XX_DEVICE_MODE_ENABLED_WRITE, error))
+		return FALSE;
+	if (!fu_bcm57xx_device_write (self, 0x0, buf_dwrds, bufsz_dwrds, error))
+		return FALSE;
+	if (!fu_bcm57xx_device_set_mode (self, FU_BCM57XX_DEVICE_MODE_DISABLED, error))
 		return FALSE;
 
 	/* success */
@@ -527,7 +496,7 @@ fu_bcm57xx_device_init (FuBcm57xxDevice *self)
 	fu_device_set_firmware_size (FU_DEVICE (self), BCM_FIRMWARE_SIZE);
 
 	/* no BARs mapped */
-	for (guint i = 0; i < FU_BCM57XX_MMAP_MAX; i++) {
+	for (guint i = 0; i < FU_BCM57XX_BAR_MAX; i++) {
 		self->bar[i].buf = NULL;
 		self->bar[i].bufsz = 0;
 	}

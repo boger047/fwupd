@@ -28,6 +28,7 @@ shared_module('fu_plugin_bcm57xx',
   c_args : cargs,
   dependencies : [
     plugin_deps,
+    valgrind,
   ],
 )
 
