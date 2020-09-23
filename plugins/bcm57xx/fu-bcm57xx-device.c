@@ -71,7 +71,7 @@ fu_bcm57xx_device_close (FuDevice *device, GError **error)
 }
 
 typedef union {
-	guint32 data;
+	guint32 r32;
 	struct {
 		guint32 reserved_0_0		: 1;
 		guint32 Reset			: 1;
@@ -86,11 +86,11 @@ typedef union {
 		guint32 WriteEnableCommand	: 1;
 		guint32 WriteDisableCommand	: 1;
 		guint32 reserved_31_18		: 14;
-	} __attribute__((packed)) fields;
+	} __attribute__((packed)) bits;
 } RegNVMCommand_t;
 
 typedef union {
-	guint32 data;
+	guint32 r32;
 	struct {
 		guint32 ReqSet0			: 1;
 		guint32 ReqSet1			: 1;
@@ -109,16 +109,16 @@ typedef union {
 		guint32 Req2			: 1;
 		guint32 Req3			: 1;
 		guint32 reserved_31_16		: 16;
-	} __attribute__((packed)) fields;
+	} __attribute__((packed)) bits;
 } RegNVMSoftwareArbitration_t;
 
 typedef union {
-	guint32 data;
+	guint32 r32;
 	struct {
 		guint32 Enable			: 1;
 		guint32 WriteEnable		: 1;
 		guint32 reserved_31_2		: 30;
-	} __attribute__((packed)) fields;
+	} __attribute__((packed)) bits;
 } RegNVMAccess_t;
 
 
@@ -130,22 +130,22 @@ typedef union {
 #endif
 
 #if 0
-static uint32_t
-read_from_ram (uint32_t val, uint32_t offset, void *args)
+static guint32
+read_from_ram (guint32 val, guint32 offset, void *args)
 {
 	uint8_t *base = (uint8_t *) args;
 	base += offset;
 	BARRIER();
-	return *(uint32_t *)base;
+	return *(guint32 *)base;
 }
 
-static uint32_t
-write_to_ram (uint32_t val, uint32_t offset, void *args)
+static guint32
+write_to_ram (guint32 val, guint32 offset, void *args)
 {
 	uint8_t *base = (uint8_t *) args;
 	base += offset;
 	BARRIER();
-	*(uint32_t *)base = val;
+	*(guint32 *)base = val;
 	BARRIER();
 	return val;
 }
@@ -159,7 +159,6 @@ fu_bcm57xx_device_bar_read (FuBcm57xxDevice *self, guint bar, gsize offset)
 	return *(guint32 *)base;
 }
 
-#if 0
 static void
 fu_bcm57xx_device_bar_write (FuBcm57xxDevice *self, guint bar, gsize offset, guint32 val)
 {
@@ -168,24 +167,146 @@ fu_bcm57xx_device_bar_write (FuBcm57xxDevice *self, guint bar, gsize offset, gui
 	*(guint32 *)base = val;
 	BARRIER();
 }
-#endif
 
-#define REG_DEVICE_PCI_VENDOR_DEVICE_ID ((volatile guint32*)0xc0006434) /* This is the undocumented register used to set the PCI Vendor/Device ID, which is configurable from NVM. */
+#define REG_DEVICE_PCI_VENDOR_DEVICE_ID		0x6434
+#define REG_NVM_SOFTWARE_ARBITRATION		0x7020
+#define REG_NVM_ACCESS				0x7024
+#define REG_NVM_COMMAND				0x7000
+#define REG_NVM_ADDR				0x700c
+#define REG_NVM_READ				0x7010
+#define REG_NVM_WRITE				0x7008
 
-#define REG_NVM_BASE ((volatile void*)0xc0007000) /* Non-Volatile Memory Registers */
-#define REG_NVM_SIZE (sizeof(NVM_t))
-#define REG_NVM_COMMAND ((volatile guint32*)0xc0007000) /*  */
-#define REG_NVM_WRITE ((volatile guint32*)0xc0007008) /* 32bits of write data are used when write commands are executed. */
-#define REG_NVM_ADDR ((volatile guint32*)0xc000700c) /* The 24 bit address for a read or write operation (must be 4 byte aligned). */
-#define REG_NVM_READ ((volatile guint32*)0xc0007010) /* 32bits of read data are used when read commands are executed. */
-#define REG_NVM_NVM_CFG_1 ((volatile guint32*)0xc0007014) /*  */
-#define REG_NVM_NVM_CFG_2 ((volatile guint32*)0xc0007018) /*  */
-#define REG_NVM_NVM_CFG_3 ((volatile guint32*)0xc000701c) /*  */
-#define REG_NVM_SOFTWARE_ARBITRATION ((volatile guint32*)0xc0007020) /*  */
-#define REG_NVM_ACCESS ((volatile guint32*)0xc0007024) /*  */
-#define REG_NVM_NVM_WRITE_1 ((volatile guint32*)0xc0007028) /*  */
-#define REG_NVM_ARBITRATION_WATCHDOG ((volatile guint32*)0xc000702c) /*  */
-#define REG_NVM_AUTO_SENSE_STATUS ((volatile guint32*)0xc0007038) /*  */
+typedef enum {
+	FU_BCM57XX_DEVICE_MODE_DISABLED,
+	FU_BCM57XX_DEVICE_MODE_ENABLED,
+	FU_BCM57XX_DEVICE_MODE_ENABLED_WRITE,
+} FuBcm57xxDeviceMode;
+
+static gboolean
+fu_bcm57xx_device_set_mode (FuBcm57xxDevice *self, FuBcm57xxDeviceMode mode, GError **error)
+{
+	RegNVMAccess_t tmp;
+	tmp.r32 = fu_bcm57xx_device_bar_read (self, 0x0, REG_NVM_ACCESS);
+	tmp.bits.Enable = mode == FU_BCM57XX_DEVICE_MODE_ENABLED ||
+			  mode == FU_BCM57XX_DEVICE_MODE_ENABLED_WRITE;
+	tmp.bits.WriteEnable = mode == FU_BCM57XX_DEVICE_MODE_ENABLED_WRITE;
+	fu_bcm57xx_device_bar_write (self, 0x0, REG_NVM_ACCESS, tmp.r32);
+	return TRUE;
+}
+
+static gboolean
+fu_bcm57xx_device_acquire_lock (FuBcm57xxDevice *self, GError **error)
+{
+	RegNVMSoftwareArbitration_t tmp = { 0 };
+	GTimer *timer = g_timer_new ();
+
+	tmp.bits.ReqSet1 = 1;
+	fu_bcm57xx_device_bar_write (self, 0x0, REG_NVM_SOFTWARE_ARBITRATION, tmp.r32);
+	do {
+		tmp.r32 = fu_bcm57xx_device_bar_read (self, 0x0, REG_NVM_SOFTWARE_ARBITRATION);
+		if (tmp.bits.ArbWon1)
+			return TRUE;
+		if (g_timer_elapsed (timer, NULL) > 0.2)
+			break;
+	} while (TRUE);
+
+	/* timed out */
+	g_set_error_literal (error,
+			     G_IO_ERROR,
+			     G_IO_ERROR_TIMED_OUT,
+			     "timed out trying to aquire lock #1");
+	return FALSE;
+}
+
+static gboolean
+fu_bcm57xx_device_release_lock (FuBcm57xxDevice *self, GError **error)
+{
+	RegNVMSoftwareArbitration_t tmp = { 0 };
+	tmp.r32 = 0;
+	tmp.bits.ReqClr1 = 1;
+	fu_bcm57xx_device_bar_write (self, 0x0, REG_NVM_SOFTWARE_ARBITRATION, tmp.r32);
+	return TRUE;
+}
+
+static gboolean
+fu_bcm57xx_device_wait_done (FuBcm57xxDevice *self, GError **error)
+{
+	RegNVMCommand_t tmp = { 0 };
+	GTimer *timer = g_timer_new ();
+	do {
+		tmp.r32 = fu_bcm57xx_device_bar_read (self, 0x0, REG_NVM_COMMAND);
+		if (tmp.bits.Done)
+			return TRUE;
+		if (g_timer_elapsed (timer, NULL) > 0.2)
+			break;
+	} while (TRUE);
+
+	/* timed out */
+	g_set_error_literal (error,
+			     G_IO_ERROR,
+			     G_IO_ERROR_TIMED_OUT,
+			     "timed out");
+	return FALSE;
+}
+
+static void
+fu_bcm57xx_device_clear_done (FuBcm57xxDevice *self)
+{
+	RegNVMCommand_t tmp = { 0 };
+	tmp.bits.Done = 1;
+	fu_bcm57xx_device_bar_write (self, 0x0, REG_NVM_COMMAND, tmp.r32);
+}
+
+static gboolean
+fu_bcm57xx_device_read (FuBcm57xxDevice *self,
+			guint32 address, guint32 *buf, gsize bufsz,
+			GError **error)
+{
+	for (guint i = 0; i < bufsz; i++) {
+		RegNVMCommand_t tmp = { 0 };
+		fu_bcm57xx_device_clear_done (self);
+		fu_bcm57xx_device_bar_write (self, 0x0, REG_NVM_ADDR, address);
+		tmp.bits.Doit = 1;
+		tmp.bits.First = (i == 0);
+		tmp.bits.Last = (i == bufsz - 1);
+		fu_bcm57xx_device_bar_write (self, 0x0, REG_NVM_COMMAND, tmp.r32);
+		if (!fu_bcm57xx_device_wait_done (self, error)) {
+			g_prefix_error (error, "failed to read @0x%x: ", address);
+			return FALSE;
+		}
+		buf[i] = GUINT32_FROM_BE(fu_bcm57xx_device_bar_read (self, 0x0, REG_NVM_READ));
+		address += sizeof(guint32);
+	}
+
+	/* success */
+	return TRUE;
+}
+
+static gboolean
+fu_bcm57xx_device_write (FuBcm57xxDevice *self,
+			 guint32 address, const guint32 *buf, gsize bufsz,
+			 GError **error)
+{
+	for (guint i = 0; i < bufsz; i++) {
+		RegNVMCommand_t tmp = { 0 };
+		fu_bcm57xx_device_clear_done (self);
+		fu_bcm57xx_device_bar_write (self, 0x0, REG_NVM_WRITE, GUINT32_TO_BE(buf[i]));
+		fu_bcm57xx_device_bar_write (self, 0x0, REG_NVM_ADDR, address);
+		tmp.bits.Wr = 1;
+		tmp.bits.Doit = 1;
+		tmp.bits.First = (i == 0);
+		tmp.bits.Last = (i == bufsz - 1);
+		fu_bcm57xx_device_bar_write (self, 0x0, REG_NVM_COMMAND, tmp.r32);
+		if (!fu_bcm57xx_device_wait_done (self, error)) {
+			g_prefix_error (error, "failed to read @0x%x: ", address);
+			return FALSE;
+		}
+		address += sizeof(guint32);
+	}
+
+	/* success */
+	return TRUE;
+}
 
 static gboolean
 fu_bcm57xx_device_detach (FuDevice *device, GError **error)
@@ -193,17 +314,21 @@ fu_bcm57xx_device_detach (FuDevice *device, GError **error)
 	FuBcm57xxDevice *self = FU_BCM57XX_DEVICE (device);
 	FuUdevDevice *udev_device = FU_UDEV_DEVICE (device);
 	const gchar *sysfs_path = fu_udev_device_get_sysfs_path (udev_device);
+	guint32 vendev;
 
 	/* unbind tg3 */
 	if (!fu_device_unbind_driver (device, error))
 		return FALSE;
 
 #if 0
-    if(RUNNING_ON_VALGRIND)
-    {
-        cerr << "Running on valgrind is not supported when mmaping device registers." << endl;
-        return false;;
-    }
+	/* this can't work */
+	if (RUNNING_ON_VALGRIND) {
+		g_set_error_literal (error,
+				     G_IO_ERROR,
+				     G_IO_ERROR_NOT_SUPPORTED,
+				     "running on valgrind is not supported");
+		return FALSE;
+	}
 #endif
 
 	/* map BARs */
@@ -228,7 +353,7 @@ fu_bcm57xx_device_detach (FuDevice *device, GError **error)
 			g_set_error (error,
 				     G_IO_ERROR,
 				     G_IO_ERROR_NOT_SUPPORTED,
-				     "cound not stat %s", fn);
+				     "could not stat %s", fn);
 			close (memfd);
 			return FALSE;
 		}
@@ -250,8 +375,38 @@ fu_bcm57xx_device_detach (FuDevice *device, GError **error)
 		}
 	}
 
-	g_error ("REG_DEVICE_PCI_VENDOR_DEVICE_ID=%x",
-		 fu_bcm57xx_device_bar_read (self, 0x0, 0xc0006434));
+	/* verify we can read something simple */
+	vendev = fu_bcm57xx_device_bar_read (self, 0x0, REG_DEVICE_PCI_VENDOR_DEVICE_ID);
+	g_debug ("REG_DEVICE_PCI_VENDOR_DEVICE_ID=%x", vendev);
+	if ((vendev & 0xffff0000) >> 4 != 0x14e4) {
+		g_set_error (error,
+			     G_IO_ERROR,
+			     G_IO_ERROR_NOT_SUPPORTED,
+			     "invalid bar[0] VID, got %08x, expected %04xXXXX",
+			     vendev, (guint) 0x14e4);
+		return FALSE;
+	}
+
+	if (!fu_bcm57xx_device_acquire_lock (self, error))
+		return FALSE;
+	if (!fu_bcm57xx_device_set_mode (self, FU_BCM57XX_DEVICE_MODE_ENABLED, error))
+		return FALSE;
+
+	{
+		guint32 buf[4] = { 0x0 };
+		if (!fu_bcm57xx_device_read (self, 0x0, buf, 4, error))
+			return FALSE;
+		for (guint i = 0; i < 4; i++)
+			g_warning ("%02x", buf[i]);
+	}
+
+	if (!fu_bcm57xx_device_release_lock (self, error))
+		return FALSE;
+
+	if (0) {
+		if (!fu_bcm57xx_device_write (self, 0x0, NULL, 0, error))
+			return FALSE;
+	}
 
 	/* success */
 	return TRUE;
